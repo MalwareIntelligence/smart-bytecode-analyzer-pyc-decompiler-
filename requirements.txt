@@ -1,0 +1,25 @@
+# Smart Bytecode Analyzer v3.0 - Dependencies
+
+# GUI Framework
+customtkinter>=5.2.0
+
+# Standard library modules (included with Python)
+# - tkinter (usually pre-installed)
+# - dis
+# - marshal
+# - sys
+# - os
+# - json
+# - hashlib
+# - pathlib
+# - datetime
+# - collections
+# - types
+# - argparse
+# - io
+# - re
+
+# Optional: For enhanced features (uncomment if needed)
+# pillow>=10.0.0  # For image handling in GUI
+# pygments>=2.15.0  # For syntax highlighting
+# psutil>=5.9.0  # For system monitoring
