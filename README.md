@@ -21,11 +21,14 @@ Core Capabilities
 
 🎯 Near‑Perfect Code Reconstruction – VM‑based bytecode interpretation
 
-🐍 Wide Python Support – Python 3.0 to 3.14 (including 3.14rc3)
+🐍 Wide Python Support – Python 3.0 to 3.16 Future proof
 
 🔄 Control Flow Analysis – Loops, exceptions, conditionals
 
 📊 Static Analysis – Functions, classes, imports extraction
+
+✨ Deobfuscator - Helps with reconstruction by deobfuscating the file
+
 
 🎨 Modern GUI – Built with CustomTkinter
 
