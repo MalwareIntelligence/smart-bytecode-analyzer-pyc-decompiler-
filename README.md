@@ -1,4 +1,4 @@
-🔬 Smart Bytecode Analyzer v3.0
+🔬 Smart Bytecode Analyzer v7.0
 
 
 
@@ -7,7 +7,7 @@
 
 Near‑perfect reconstruction of Python source code from compiled .pyc bytecode files.
 
-A powerful modern tool for analyzing and reconstructing Python bytecode, supporting Python 3.0 through 3.14, featuring an intuitive GUI and advanced static analysis capabilities.
+A powerful modern tool for analyzing and reconstructing Python bytecode, supporting Python 3.0 through 3.16, featuring an intuitive GUI and advanced static analysis capabilities.
 
 ⚠️ Important Notice
 
@@ -114,8 +114,8 @@ Version	Status
 3.11.8	✅ Fully Tested
 3.12	✅ Supported
 3.13	✅ Supported
-3.14rc3	⚠️ Experimental
-Early RC Builds	❌ Unsupported
+Early Builds  ✅ Supported
+non out versions ✅ Supported
 🛠️ Project Structure
 smart-bytecode-analyzer/
 ├── analyzer.py
