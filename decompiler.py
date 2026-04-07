@@ -3634,6 +3634,29 @@ class SafeBytecodeDisassembler:
                         elif op == 124:
                             intelligence['var_contexts'][actual_index].add('loaded')
                     
+                    # ─── Function / call opcodes ───────────────────────────────────
+                    elif op in {
+                        131, 171,   # CALL_FUNCTION / CALL
+                        141, 142,   # CALL_FUNCTION_KW / CALL_FUNCTION_EX
+                        161,        # CALL_METHOD
+                        132,        # MAKE_FUNCTION
+                        86, 72, 123, # YIELD_VALUE / YIELD_FROM / SEND
+                        73, 98, 50, # GET_AWAITABLE / GET_AITER / GET_ANEXT
+                        173, 174,   # CALL_INTRINSIC_1 / CALL_INTRINSIC_2
+                        155, 157,   # FORMAT_VALUE / BUILD_STRING
+                        92, 94,     # UNPACK_SEQUENCE / UNPACK_EX
+                        75, 135,    # RETURN_GENERATOR / LOAD_SUPER_ATTR
+                    }:
+                        intelligence['name_contexts'][actual_index].add('function_op')
+                    
+                    # ─── IS_OP / CONTAINS_OP ──────────────────────────────────────
+                    elif op in {117, 118}:
+                        intelligence['name_contexts'][actual_index].add('compare_op')
+                    
+                    # ─── Collection helpers ────────────────────────────────────────
+                    elif op in {162, 163, 164, 165, 166, 167, 168, 82}:
+                        intelligence['name_contexts'][actual_index].add('collection_op')
+                    
                     # Track operation sequence for context
                     recent_ops.append((op, actual_index, i))
                     recent_ops = recent_ops[-15:]  # Keep last 15 for context
@@ -4358,7 +4381,209 @@ class InstructionAnalyzer:
         if opname in ('CALL', 'CALL_FUNCTION'):
             nargs = instr.arg or 0
             return -(nargs + 1) + 1
-        
+
+        # CALL_FUNCTION_KW: pops func + nargs positional/kw + 1 kw-name-tuple → push 1
+        if opname == 'CALL_FUNCTION_KW':
+            nargs = instr.arg or 0
+            return -(nargs + 2) + 1
+
+        # CALL_FUNCTION_EX: pops func + args + optional kwargs → push 1
+        if opname == 'CALL_FUNCTION_EX':
+            return -(2 + bool(instr.arg)) + 1
+
+        # CALL_METHOD: pops method + self + nargs → push 1
+        if opname == 'CALL_METHOD':
+            nargs = instr.arg or 0
+            return -(nargs + 2) + 1
+
+        # MAKE_FUNCTION: pops qualname + code + up to 4 extras → push 1
+        if opname == 'MAKE_FUNCTION':
+            flags = instr.arg or 0
+            extras = bin(flags & 0x0F).count('1')
+            return -(2 + extras) + 1
+
+        # CALL_INTRINSIC_1: pop 1, push 1 → net 0
+        if opname == 'CALL_INTRINSIC_1':
+            return 0
+
+        # CALL_INTRINSIC_2: pop 2, push 1 → net -1
+        if opname == 'CALL_INTRINSIC_2':
+            return -1
+
+        # YIELD_VALUE: pop 1, push 1 (resumed value) → net 0
+        if opname in ('YIELD_VALUE', 'YIELD_FROM', 'SEND'):
+            return 0
+
+        # GET_AWAITABLE / GET_AITER / GET_ANEXT / GET_ITER / GET_YIELD_FROM_ITER
+        if opname in ('GET_AWAITABLE', 'GET_AITER', 'GET_ANEXT',
+                      'GET_ITER', 'GET_YIELD_FROM_ITER', 'ASYNC_GEN_WRAP'):
+            return 0
+
+        # FORMAT_VALUE: pop 1 (+fmt_spec if flag), push 1
+        if opname == 'FORMAT_VALUE':
+            has_fmt = bool((instr.arg or 0) & 0x04)
+            return -(1 + has_fmt) + 1
+
+        # BUILD_STRING: pop count, push 1
+        if opname == 'BUILD_STRING':
+            return -(instr.arg or 0) + 1
+
+        # IS_OP / CONTAINS_OP: pop 2, push 1
+        if opname in ('IS_OP', 'CONTAINS_OP'):
+            return -1
+
+        # LOAD_SUPER_ATTR: pop 3 (super/type/self), push 1
+        if opname == 'LOAD_SUPER_ATTR':
+            return -2
+
+        # LOAD_CLASSDEREF / LOAD_LOCALS: push 1
+        if opname in ('LOAD_CLASSDEREF', 'LOAD_LOCALS'):
+            return 1
+
+        # COPY_DICT_WITHOUT_KEYS: pop 2, push 1
+        if opname == 'COPY_DICT_WITHOUT_KEYS':
+            return -1
+
+        # MATCH_MAPPING / MATCH_SEQUENCE: pop 1, push 2 (subject + bool)
+        if opname in ('MATCH_MAPPING', 'MATCH_SEQUENCE'):
+            return 1
+
+        # MATCH_KEYS: pop 2, push 3 (subject + keys + matched-values)
+        if opname == 'MATCH_KEYS':
+            return 1
+
+        # MATCH_CLASS: pops count+2, push 1
+        if opname == 'MATCH_CLASS':
+            nargs = instr.arg or 0
+            return -(nargs + 2) + 1
+
+        # UNPACK_SEQUENCE: pop 1, push n
+        if opname == 'UNPACK_SEQUENCE':
+            n = instr.arg or 0
+            return n - 1
+
+        # UNPACK_EX: pop 1, push (n_before + 1 + n_after)
+        if opname == 'UNPACK_EX':
+            arg = instr.arg or 0
+            n_before = arg & 0xFF
+            n_after  = (arg >> 8) & 0xFF
+            return n_before + 1 + n_after - 1
+
+        # LIST_EXTEND / SET_UPDATE / DICT_UPDATE / DICT_MERGE: pop 1 (TOS stays)
+        if opname in ('LIST_EXTEND', 'SET_UPDATE', 'DICT_UPDATE', 'DICT_MERGE'):
+            return -1
+
+        # MAP_ADD / LIST_APPEND / SET_ADD: pop key+val (or just val), TOS stays
+        if opname in ('MAP_ADD',):
+            return -2
+        if opname in ('LIST_APPEND', 'SET_ADD'):
+            return -1
+
+        # LIST_TO_TUPLE: pop 1, push 1
+        if opname == 'LIST_TO_TUPLE':
+            return 0
+
+        # BUILD_SLICE: pop 2 or 3, push 1
+        if opname == 'BUILD_SLICE':
+            return -(instr.arg or 2) + 1
+
+        # DUP_TOP / DUP_TOP_TWO
+        if opname == 'DUP_TOP':
+            return 1
+        if opname == 'DUP_TOP_TWO':
+            return 2
+
+        # ROT_* / COPY: net 0
+        if opname in ('ROT_TWO', 'ROT_THREE', 'ROT_FOUR', 'ROT_N', 'COPY'):
+            return 0
+
+        # RAISE_VARARGS: pops argc values, pushes 0
+        if opname == 'RAISE_VARARGS':
+            return -(instr.arg or 0)
+
+        # RERAISE: net 0 (stays in handler)
+        if opname == 'RERAISE':
+            return 0
+
+        # WITH_EXCEPT_START: pushes 1 (result of __exit__)
+        if opname == 'WITH_EXCEPT_START':
+            return 1
+
+        # PUSH_EXC_INFO: push exc + old-exc → net +2
+        if opname == 'PUSH_EXC_INFO':
+            return 2
+
+        # CHECK_EXC_MATCH: pop 2, push 1
+        if opname == 'CHECK_EXC_MATCH':
+            return -1
+
+        # SETUP_FINALLY / SETUP_EXCEPT / SETUP_WITH / BEFORE_WITH: net 0 (just marks handler)
+        if opname in ('SETUP_FINALLY', 'SETUP_EXCEPT', 'SETUP_WITH',
+                      'BEFORE_WITH', 'BEFORE_ASYNC_WITH'):
+            return 0
+
+        # END_FINALLY / POP_BLOCK: pop exc info
+        if opname in ('END_FINALLY',):
+            return -1
+        if opname == 'POP_BLOCK':
+            return 0
+
+        # BINARY_SUBSCR / STORE_SUBSCR / DELETE_SUBSCR
+        if opname == 'BINARY_SUBSCR':
+            return -1
+        if opname == 'STORE_SUBSCR':
+            return -3
+        if opname == 'DELETE_SUBSCR':
+            return -2
+
+        # STORE_ATTR / DELETE_ATTR
+        if opname == 'STORE_ATTR':
+            return -2
+        if opname == 'DELETE_ATTR':
+            return -1
+
+        # UNARY ops: pop 1, push 1
+        if opname in ('UNARY_NEGATIVE', 'UNARY_NOT', 'UNARY_INVERT', 'UNARY_POSITIVE'):
+            return 0
+
+        # INPLACE_* (Python < 3.12): pop 2, push 1
+        if opname.startswith('INPLACE_'):
+            return -1
+
+        # Legacy BINARY_* (Python < 3.12): pop 2, push 1
+        if opname.startswith('BINARY_') and opname != 'BINARY_OP':
+            return -1
+
+        # IMPORT_NAME / IMPORT_FROM / IMPORT_STAR
+        if opname == 'IMPORT_NAME':
+            return -1   # pop level + fromlist, push module
+        if opname == 'IMPORT_FROM':
+            return 1    # keeps module on stack, pushes attribute
+        if opname == 'IMPORT_STAR':
+            return -1
+
+        # DELETE_* (no stack change beyond consuming one reference)
+        if opname in ('DELETE_NAME', 'DELETE_FAST', 'DELETE_GLOBAL', 'DELETE_DEREF'):
+            return 0
+
+        # PRINT_EXPR (Python 2 legacy): pop 1
+        if opname == 'PRINT_EXPR':
+            return -1
+
+        # JUMP ops: net 0
+        if 'JUMP' in opname or opname in ('FOR_ITER',):
+            return 0
+
+        # NOP / RESUME / PRECALL / PUSH_NULL / KW_NAMES / MAKE_CELL / COPY_FREE_VARS
+        if opname in ('NOP', 'RESUME', 'PRECALL', 'PUSH_NULL', 'KW_NAMES',
+                      'MAKE_CELL', 'COPY_FREE_VARS', 'CACHE', 'EXTENDED_ARG',
+                      'RETURN_GENERATOR', 'CLEANUP_THROW', 'STOPITERATION_ERROR'):
+            return 0
+
+        # RETURN_CONST (Python 3.12+): pop 0, but terminates block
+        if opname == 'RETURN_CONST':
+            return 0
+
         return 0
 
 
@@ -5129,18 +5354,526 @@ class SafeBytecodeInterpreter:
                     arg = self.state.pop()
                     if str(arg) != 'NULL':
                         args.insert(0, str(arg))
-                
                 func = self.state.pop()
                 self.state.push(f"{func}({', '.join(args)})")
                 return None
-            
+
+            # CALL_FUNCTION_KW  (Python 3.0–3.11)
+            elif op == 'CALL_FUNCTION_KW':
+                kw_names = self.state.pop()          # TOS: tuple of kw-names
+                nargs = instr.arg or 0
+                if isinstance(kw_names, tuple):
+                    n_kw = len(kw_names)
+                else:
+                    n_kw = 0
+                    kw_names = ()
+                kw_args = {}
+                for name in reversed(kw_names):
+                    kw_args[name] = self.state.pop()
+                pos_args = []
+                for _ in range(nargs - n_kw):
+                    pos_args.insert(0, self.state.pop())
+                func = self.state.pop()
+                kw_str = ', '.join(f"{k}={v}" for k, v in kw_args.items())
+                pos_str = ', '.join(str(a) for a in pos_args)
+                all_args = ', '.join(filter(None, [pos_str, kw_str]))
+                self.state.push(f"{func}({all_args})")
+                return None
+
+            # CALL_FUNCTION_EX  (Python 3.6+)
+            elif op == 'CALL_FUNCTION_EX':
+                has_kwargs = bool(instr.arg)
+                kwargs = self.state.pop() if has_kwargs else '{}'
+                args   = self.state.pop()
+                func   = self.state.pop()
+                if has_kwargs:
+                    self.state.push(f"{func}(*{args}, **{kwargs})")
+                else:
+                    self.state.push(f"{func}(*{args})")
+                return None
+
+            # CALL_METHOD  (Python 3.0–3.11)
+            elif op == 'CALL_METHOD':
+                nargs = instr.arg or 0
+                args = []
+                for _ in range(nargs):
+                    args.insert(0, self.state.pop())
+                func = self.state.pop()
+                self.state.push(f"{func}({', '.join(str(a) for a in args)})")
+                return None
+
+            # MAKE_FUNCTION  (Python 3.x)
+            elif op == 'MAKE_FUNCTION':
+                flags = instr.arg or 0
+                qual_name = self.state.pop()
+                code_obj  = self.state.pop()
+                annotations = self.state.pop() if flags & 0x04 else None
+                kwdefaults  = self.state.pop() if flags & 0x02 else None
+                defaults    = self.state.pop() if flags & 0x01 else None
+                closure     = self.state.pop() if flags & 0x08 else None
+                fn_name = str(qual_name).strip("'\"").split('.')[-1]
+                self.state.push(fn_name)
+                return f"{indent}# def {fn_name}(...)  [MAKE_FUNCTION flags=0x{flags:02x}]"
+
+            # RETURN_CONST (Python 3.12+)
+            elif op == 'RETURN_CONST':
+                val = instr.argval
+                return f"{indent}return {repr(val) if isinstance(val, str) else val}"
+
+            # YIELD_VALUE
+            elif op == 'YIELD_VALUE':
+                value = self.state.pop() if self.state.stack else 'None'
+                self.state.push(f"(yield {value})")
+                return None
+
+            # YIELD_FROM (Python 3.3–3.11)
+            elif op == 'YIELD_FROM':
+                value = self.state.pop() if self.state.stack else 'None'
+                iter_ = self.state.pop() if self.state.stack else 'iter'
+                self.state.push(f"(yield from {iter_})")
+                return None
+
+            # SEND (Python 3.11+ generator send)
+            elif op == 'SEND':
+                value = self.state.pop() if self.state.stack else 'None'
+                gen   = self.state.pop() if self.state.stack else 'gen'
+                self.state.push(f"{gen}.send({value})")
+                return None
+
+            # GET_AWAITABLE / GET_AITER / GET_ANEXT
+            elif op == 'GET_AWAITABLE':
+                val = self.state.pop() if self.state.stack else 'coro'
+                self.state.push(f"await {val}")
+                return None
+            elif op == 'GET_AITER':
+                val = self.state.pop() if self.state.stack else 'obj'
+                self.state.push(f"aiter({val})")
+                return None
+            elif op == 'GET_ANEXT':
+                val = self.state.pop() if self.state.stack else 'obj'
+                self.state.push(f"anext({val})")
+                return None
+
+            # ASYNC_GEN_WRAP (Python 3.10+)
+            elif op == 'ASYNC_GEN_WRAP':
+                val = self.state.pop() if self.state.stack else 'val'
+                self.state.push(f"async_gen_wrap({val})")
+                return None
+
+            # FORMAT_VALUE (Python 3.6–3.11, used in f-strings)
+            elif op == 'FORMAT_VALUE':
+                val  = self.state.pop() if self.state.stack else ''
+                fmt_flags = instr.arg or 0
+                has_fmt_spec = bool(fmt_flags & 0x04)
+                conv = {0x01: '!s', 0x02: '!r', 0x03: '!a'}.get(fmt_flags & 0x03, '')
+                fmt_spec = f":{self.state.pop()}" if has_fmt_spec and self.state.stack else ''
+                self.state.push(f"{{{val}{conv}{fmt_spec}}}")
+                return None
+
+            # BUILD_STRING (Python 3.6+, used in f-strings)
+            elif op == 'BUILD_STRING':
+                count = instr.arg or 0
+                parts = []
+                for _ in range(count):
+                    parts.insert(0, self.state.pop() if self.state.stack else '')
+                self.state.push(f"f\"{''.join(str(p) for p in parts)}\"")
+                return None
+
+            # LOAD_SUPER_ATTR (Python 3.12+)
+            elif op == 'LOAD_SUPER_ATTR':
+                obj   = self.state.pop() if self.state.stack else 'self'
+                cls   = self.state.pop() if self.state.stack else 'cls'
+                sup_  = self.state.pop() if self.state.stack else 'super()'
+                self.state.push(f"super().{instr.argval}")
+                return None
+
+            # LOAD_CLASSDEREF (closures in class scope, Python 3.x)
+            elif op == 'LOAD_CLASSDEREF':
+                self.state.push(str(instr.argval))
+                return None
+
+            # LOAD_LOCALS (class body)
+            elif op == 'LOAD_LOCALS':
+                self.state.push('locals()')
+                return None
+
+            # IS_OP (Python 3.9+)
+            elif op == 'IS_OP':
+                right = self.state.pop() if self.state.stack else 'None'
+                left  = self.state.pop() if self.state.stack else 'None'
+                op_str = 'is not' if instr.arg else 'is'
+                self.state.push(f"({left} {op_str} {right})")
+                return None
+
+            # CONTAINS_OP (Python 3.9+)
+            elif op == 'CONTAINS_OP':
+                right = self.state.pop() if self.state.stack else 'container'
+                left  = self.state.pop() if self.state.stack else 'val'
+                op_str = 'not in' if instr.arg else 'in'
+                self.state.push(f"({left} {op_str} {right})")
+                return None
+
+            # COPY_DICT_WITHOUT_KEYS (Python 3.10+, match stmt)
+            elif op == 'COPY_DICT_WITHOUT_KEYS':
+                keys = self.state.pop() if self.state.stack else 'keys'
+                d    = self.state.pop() if self.state.stack else 'd'
+                self.state.push(f"{{k: {d}[k] for k in {d} if k not in {keys}}}")
+                return None
+
+            # MATCH_MAPPING / MATCH_SEQUENCE / MATCH_KEYS / MATCH_CLASS
+            elif op == 'MATCH_MAPPING':
+                subj = self.state.pop() if self.state.stack else 'subj'
+                self.state.push(f"isinstance({subj}, Mapping)")
+                return None
+            elif op == 'MATCH_SEQUENCE':
+                subj = self.state.pop() if self.state.stack else 'subj'
+                self.state.push(f"isinstance({subj}, Sequence)")
+                return None
+            elif op == 'MATCH_KEYS':
+                keys = self.state.pop() if self.state.stack else 'keys'
+                subj = self.state.pop() if self.state.stack else 'subj'
+                self.state.push(f"match_keys({subj}, {keys})")
+                return None
+            elif op == 'MATCH_CLASS':
+                cls  = self.state.pop() if self.state.stack else 'cls'
+                self.state.push(f"match_class({cls})")
+                return None
+
+            # UNPACK_SEQUENCE
+            elif op == 'UNPACK_SEQUENCE':
+                seq = self.state.pop() if self.state.stack else 'seq'
+                n   = instr.arg or 0
+                for i_u in range(n - 1, -1, -1):
+                    self.state.push(f"{seq}[{i_u}]")
+                return None
+
+            # UNPACK_EX (starred unpacking, Python 3.x)
+            elif op == 'UNPACK_EX':
+                arg  = instr.arg or 0
+                n_before = arg & 0xFF
+                n_after  = (arg >> 8) & 0xFF
+                seq = self.state.pop() if self.state.stack else 'seq'
+                for i_u in range(n_after - 1, -1, -1):
+                    self.state.push(f"{seq}[-{n_after - i_u}]")
+                self.state.push(f"{seq}[{n_before}:-{n_after}]" if n_after else f"{seq}[{n_before}:]")
+                for i_u in range(n_before - 1, -1, -1):
+                    self.state.push(f"{seq}[{i_u}]")
+                return None
+
+            # LIST_EXTEND / SET_UPDATE / DICT_UPDATE / DICT_MERGE / MAP_ADD
+            elif op == 'LIST_EXTEND':
+                val  = self.state.pop() if self.state.stack else '[]'
+                lst  = self.state.stack[-1] if self.state.stack else 'lst'
+                return f"{indent}# list_extend({lst}, {val})"
+            elif op == 'SET_UPDATE':
+                val  = self.state.pop() if self.state.stack else 'set()'
+                s    = self.state.stack[-1] if self.state.stack else 'st'
+                return f"{indent}# set_update({s}, {val})"
+            elif op in ('DICT_UPDATE', 'DICT_MERGE'):
+                val  = self.state.pop() if self.state.stack else '{}'
+                d    = self.state.stack[-1] if self.state.stack else 'd'
+                return f"{indent}# {op.lower()}({d}, {val})"
+            elif op == 'MAP_ADD':
+                val = self.state.pop() if self.state.stack else 'val'
+                key = self.state.pop() if self.state.stack else 'key'
+                return f"{indent}# map_add key={key} val={val}"
+
+            # LIST_APPEND / SET_ADD  (comprehension helpers)
+            elif op == 'LIST_APPEND':
+                val = self.state.pop() if self.state.stack else 'val'
+                lst = self.state.stack[-1] if self.state.stack else 'lst'
+                return f"{indent}# list_append({lst}, {val})"
+            elif op == 'SET_ADD':
+                val = self.state.pop() if self.state.stack else 'val'
+                s   = self.state.stack[-1] if self.state.stack else 'st'
+                return f"{indent}# set_add({s}, {val})"
+
+            # LIST_TO_TUPLE (Python 3.9+)
+            elif op == 'LIST_TO_TUPLE':
+                lst = self.state.pop() if self.state.stack else '[]'
+                self.state.push(f"tuple({lst})")
+                return None
+
+            # BUILD_SLICE
+            elif op == 'BUILD_SLICE':
+                step  = self.state.pop() if (instr.arg == 3 and self.state.stack) else None
+                stop  = self.state.pop() if self.state.stack else 'None'
+                start = self.state.pop() if self.state.stack else 'None'
+                if step is not None:
+                    self.state.push(f"{start}:{stop}:{step}")
+                else:
+                    self.state.push(f"{start}:{stop}")
+                return None
+
+            # DUP_TOP / DUP_TOP_TWO / ROT_TWO / ROT_THREE / ROT_FOUR / ROT_N / COPY
+            elif op == 'DUP_TOP':
+                val = self.state.stack[-1] if self.state.stack else 'dup'
+                self.state.push(val)
+                return None
+            elif op == 'DUP_TOP_TWO':
+                a = self.state.stack[-1] if len(self.state.stack) >= 1 else 'a'
+                b = self.state.stack[-2] if len(self.state.stack) >= 2 else 'b'
+                self.state.push(b)
+                self.state.push(a)
+                return None
+            elif op == 'ROT_TWO':
+                if len(self.state.stack) >= 2:
+                    a = self.state.pop()
+                    b = self.state.pop()
+                    self.state.push(a)
+                    self.state.push(b)
+                return None
+            elif op == 'ROT_THREE':
+                if len(self.state.stack) >= 3:
+                    a = self.state.pop()
+                    b = self.state.pop()
+                    c = self.state.pop()
+                    self.state.push(a)
+                    self.state.push(c)
+                    self.state.push(b)
+                return None
+            elif op in ('ROT_FOUR', 'ROT_N', 'COPY'):
+                # Best-effort: just note it
+                return None
+
+            # RAISE_VARARGS
+            elif op == 'RAISE_VARARGS':
+                argc = instr.arg or 0
+                if argc == 0:
+                    return f"{indent}raise"
+                exc = self.state.pop() if self.state.stack else 'Exception'
+                if argc == 1:
+                    return f"{indent}raise {exc}"
+                cause = self.state.pop() if self.state.stack else 'None'
+                return f"{indent}raise {exc} from {cause}"
+
+            # RERAISE (Python 3.9+)
+            elif op == 'RERAISE':
+                return f"{indent}raise"
+
+            # WITH_EXCEPT_START / PUSH_EXC_INFO / CHECK_EXC_MATCH
+            elif op == 'WITH_EXCEPT_START':
+                return f"{indent}# with-except-start"
+            elif op == 'PUSH_EXC_INFO':
+                return None
+            elif op == 'CHECK_EXC_MATCH':
+                exc_type = self.state.pop() if self.state.stack else 'Exception'
+                exc      = self.state.pop() if self.state.stack else 'e'
+                self.state.push(f"isinstance({exc}, {exc_type})")
+                return None
+
+            # SETUP_FINALLY / SETUP_EXCEPT / END_FINALLY / POP_BLOCK
+            elif op in ('SETUP_FINALLY', 'SETUP_EXCEPT'):
+                return f"{indent}# try:"
+            elif op == 'END_FINALLY':
+                return f"{indent}# end-finally"
+            elif op == 'POP_BLOCK':
+                return None
+
+            # SETUP_WITH / BEFORE_WITH (Python 3.1+/3.11+)
+            elif op in ('SETUP_WITH', 'BEFORE_WITH'):
+                ctx = self.state.pop() if self.state.stack else 'ctx'
+                return f"{indent}with {ctx}:"
+            elif op == 'WITH_CLEANUP_START':
+                return None
+            elif op == 'WITH_CLEANUP_FINISH':
+                return None
+
+            # BEFORE_ASYNC_WITH (Python 3.5+)
+            elif op == 'BEFORE_ASYNC_WITH':
+                ctx = self.state.pop() if self.state.stack else 'ctx'
+                return f"{indent}async with {ctx}:"
+
+            # RETURN_GENERATOR (Python 3.12+ generator functions)
+            elif op == 'RETURN_GENERATOR':
+                return f"{indent}# generator-function entry"
+
+            # CALL_INTRINSIC_1 / CALL_INTRINSIC_2 (Python 3.12+)
+            elif op == 'CALL_INTRINSIC_1':
+                val = self.state.pop() if self.state.stack else 'val'
+                intrinsic_names = {
+                    1: 'print',
+                    2: 'import_star',
+                    3: 'stopiteration_error',
+                    4: 'async_gen_asend',
+                    5: 'list_to_tuple',
+                    6: 'typevar_with_bound',
+                    7: 'typevar_with_constraints',
+                    8: 'set_function_type_params',
+                }
+                name = intrinsic_names.get(instr.arg, f'intrinsic_{instr.arg}')
+                self.state.push(f"{name}({val})")
+                return None
+            elif op == 'CALL_INTRINSIC_2':
+                val2 = self.state.pop() if self.state.stack else 'val2'
+                val1 = self.state.pop() if self.state.stack else 'val1'
+                self.state.push(f"intrinsic2_{instr.arg}({val1}, {val2})")
+                return None
+
+            # CLEANUP_THROW (Python 3.12+)
+            elif op == 'CLEANUP_THROW':
+                return f"{indent}# cleanup-throw"
+
+            # STOPITERATION_ERROR (Python 3.12+)
+            elif op == 'STOPITERATION_ERROR':
+                return f"{indent}# stopiteration-error"
+
+            # GET_ITER / GET_YIELD_FROM_ITER
+            elif op == 'GET_ITER':
+                val = self.state.pop() if self.state.stack else 'obj'
+                self.state.push(f"iter({val})")
+                return None
+            elif op == 'GET_YIELD_FROM_ITER':
+                val = self.state.pop() if self.state.stack else 'obj'
+                self.state.push(f"iter({val})")
+                return None
+
+            # IMPORT_NAME / IMPORT_FROM / IMPORT_STAR
+            elif op == 'IMPORT_NAME':
+                from_list = self.state.pop() if self.state.stack else None
+                level_val = self.state.pop() if self.state.stack else 0
+                mod = str(instr.argval)
+                self.state.push(mod)
+                return f"{indent}import {mod}"
+            elif op == 'IMPORT_FROM':
+                mod = self.state.stack[-1] if self.state.stack else 'mod'
+                self.state.push(f"{mod}.{instr.argval}")
+                return None
+            elif op == 'IMPORT_STAR':
+                mod = self.state.pop() if self.state.stack else 'mod'
+                return f"{indent}from {mod} import *"
+
+            # DELETE_NAME / DELETE_FAST / DELETE_GLOBAL / DELETE_ATTR / DELETE_DEREF
+            elif op in ('DELETE_NAME', 'DELETE_FAST', 'DELETE_GLOBAL', 'DELETE_DEREF'):
+                return f"{indent}del {instr.argval}"
+            elif op == 'DELETE_ATTR':
+                obj = self.state.pop() if self.state.stack else 'obj'
+                return f"{indent}del {obj}.{instr.argval}"
+            elif op == 'DELETE_SUBSCR':
+                subscr = self.state.pop() if self.state.stack else 'key'
+                obj    = self.state.pop() if self.state.stack else 'obj'
+                return f"{indent}del {obj}[{subscr}]"
+
+            # BINARY_SUBSCR / STORE_SUBSCR
+            elif op == 'BINARY_SUBSCR':
+                subscr = self.state.pop() if self.state.stack else 'key'
+                obj    = self.state.pop() if self.state.stack else 'obj'
+                self.state.push(f"{obj}[{subscr}]")
+                return None
+            elif op == 'STORE_SUBSCR':
+                subscr = self.state.pop() if self.state.stack else 'key'
+                obj    = self.state.pop() if self.state.stack else 'obj'
+                val    = self.state.pop() if self.state.stack else 'val'
+                return f"{indent}{obj}[{subscr}] = {val}"
+
+            # STORE_ATTR
+            elif op == 'STORE_ATTR':
+                obj = self.state.pop() if self.state.stack else 'obj'
+                val = self.state.pop() if self.state.stack else 'val'
+                return f"{indent}{obj}.{instr.argval} = {val}"
+
+            # UNARY operations
+            elif op == 'UNARY_NEGATIVE':
+                val = self.state.pop() if self.state.stack else '0'
+                self.state.push(f"(-{val})")
+                return None
+            elif op == 'UNARY_NOT':
+                val = self.state.pop() if self.state.stack else 'val'
+                self.state.push(f"(not {val})")
+                return None
+            elif op == 'UNARY_INVERT':
+                val = self.state.pop() if self.state.stack else 'val'
+                self.state.push(f"(~{val})")
+                return None
+            elif op == 'UNARY_POSITIVE':
+                val = self.state.pop() if self.state.stack else 'val'
+                self.state.push(f"(+{val})")
+                return None
+            elif op == 'UNARY_POSITIVE':
+                val = self.state.pop() if self.state.stack else 'val'
+                self.state.push(f"(+{val})")
+                return None
+
+            # INPLACE operations  (Python < 3.12, replaced by BINARY_OP in 3.12)
+            elif op in ('INPLACE_ADD', 'INPLACE_SUBTRACT', 'INPLACE_MULTIPLY',
+                        'INPLACE_TRUE_DIVIDE', 'INPLACE_FLOOR_DIVIDE',
+                        'INPLACE_MODULO', 'INPLACE_POWER', 'INPLACE_LSHIFT',
+                        'INPLACE_RSHIFT', 'INPLACE_AND', 'INPLACE_OR', 'INPLACE_XOR',
+                        'INPLACE_MATRIX_MULTIPLY'):
+                _iop_map = {
+                    'INPLACE_ADD': '+=', 'INPLACE_SUBTRACT': '-=',
+                    'INPLACE_MULTIPLY': '*=', 'INPLACE_TRUE_DIVIDE': '/=',
+                    'INPLACE_FLOOR_DIVIDE': '//=', 'INPLACE_MODULO': '%=',
+                    'INPLACE_POWER': '**=', 'INPLACE_LSHIFT': '<<=',
+                    'INPLACE_RSHIFT': '>>=', 'INPLACE_AND': '&=',
+                    'INPLACE_OR': '|=', 'INPLACE_XOR': '^=',
+                    'INPLACE_MATRIX_MULTIPLY': '@=',
+                }
+                right = self.state.pop() if self.state.stack else '0'
+                left  = self.state.pop() if self.state.stack else 'var'
+                return f"{indent}{left} {_iop_map.get(op,'+')} {right}"
+
+            # BINARY_* legacy ops (Python < 3.12)
+            elif op in ('BINARY_ADD', 'BINARY_SUBTRACT', 'BINARY_MULTIPLY',
+                        'BINARY_TRUE_DIVIDE', 'BINARY_FLOOR_DIVIDE', 'BINARY_MODULO',
+                        'BINARY_POWER', 'BINARY_LSHIFT', 'BINARY_RSHIFT',
+                        'BINARY_AND', 'BINARY_OR', 'BINARY_XOR',
+                        'BINARY_MATRIX_MULTIPLY'):
+                _bop_map = {
+                    'BINARY_ADD': '+', 'BINARY_SUBTRACT': '-',
+                    'BINARY_MULTIPLY': '*', 'BINARY_TRUE_DIVIDE': '/',
+                    'BINARY_FLOOR_DIVIDE': '//', 'BINARY_MODULO': '%',
+                    'BINARY_POWER': '**', 'BINARY_LSHIFT': '<<',
+                    'BINARY_RSHIFT': '>>', 'BINARY_AND': '&',
+                    'BINARY_OR': '|', 'BINARY_XOR': '^',
+                    'BINARY_MATRIX_MULTIPLY': '@',
+                }
+                right = self.state.pop() if self.state.stack else '0'
+                left  = self.state.pop() if self.state.stack else '0'
+                self.state.push(f"({left} {_bop_map.get(op, '+')} {right})")
+                return None
+
+            # PRINT_EXPR (Python 2 legacy, but can appear in some pyc files)
+            elif op == 'PRINT_EXPR':
+                val = self.state.pop() if self.state.stack else 'val'
+                return f"{indent}print({val})"
+
+            # JUMP_FORWARD / JUMP_BACKWARD / JUMP_ABSOLUTE / JUMP_IF_*
+            elif op in ('JUMP_FORWARD', 'JUMP_BACKWARD', 'JUMP_BACKWARD_NO_INTERRUPT',
+                        'JUMP_ABSOLUTE', 'JUMP_NO_INTERRUPT'):
+                return None  # handled by control-flow graph
+            elif op in ('JUMP_IF_TRUE_OR_POP', 'JUMP_IF_FALSE_OR_POP'):
+                cond = self.state.pop() if self.state.stack else 'cond'
+                self.state.push(cond)
+                return None
+            elif op in ('POP_JUMP_IF_TRUE', 'POP_JUMP_IF_FALSE',
+                        'POP_JUMP_FORWARD_IF_TRUE', 'POP_JUMP_FORWARD_IF_FALSE',
+                        'POP_JUMP_FORWARD_IF_NONE', 'POP_JUMP_FORWARD_IF_NOT_NONE',
+                        'POP_JUMP_BACKWARD_IF_TRUE', 'POP_JUMP_BACKWARD_IF_FALSE',
+                        'POP_JUMP_BACKWARD_IF_NONE', 'POP_JUMP_BACKWARD_IF_NOT_NONE'):
+                cond = self.state.pop() if self.state.stack else 'cond'
+                return f"{indent}# branch on {cond}"
+
+            # FOR_ITER
+            elif op == 'FOR_ITER':
+                iter_ = self.state.stack[-1] if self.state.stack else 'iter'
+                self.state.push(f"next({iter_})")
+                return None
+
+            # NOP / RESUME / EXTENDED_ARG / PRECALL / PUSH_NULL / KW_NAMES
+            # MAKE_CELL / COPY_FREE_VARS / CACHE  (already handled above)
+            elif op in ('NOP', 'RESUME', 'EXTENDED_ARG', 'PRECALL',
+                        'PUSH_NULL', 'KW_NAMES', 'MAKE_CELL',
+                        'COPY_FREE_VARS', 'CACHE'):
+                return None
+
             # RETURN operations
             elif op == 'RETURN_VALUE':
                 if self.state.stack:
                     value = self.state.pop()
                     return f"{indent}return {value}"
                 return f"{indent}return"
-            
+
             # POP_TOP
             elif op == 'POP_TOP':
                 expr = self.state.pop()
